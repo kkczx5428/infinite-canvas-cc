@@ -59,28 +59,31 @@ export type WebdavSyncConfig = {
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
-const OPENAI_BASE_URL = "https://api.openai.com";
+const OPENAI_BASE_URL = "/api/ai";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const SERVER_PROXY_API_KEY = "server-proxy";
+const PROXIED_OPENAI_COMPATIBLE_HOSTS = ["api.apib.ai", "api.apimart.ai"];
+const DEFAULT_PROXY_MODELS = ["gpt-image-2", "gpt-image-2-official", "sora-2", "gpt-5.2-pro", "gpt-4o-mini-tts"];
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
     baseUrl: OPENAI_BASE_URL,
-    apiKey: "",
+    apiKey: SERVER_PROXY_API_KEY,
     apiFormat: "openai",
     channels: [
         {
             id: "default",
             name: "默认渠道",
             baseUrl: OPENAI_BASE_URL,
-            apiKey: "",
+            apiKey: SERVER_PROXY_API_KEY,
             apiFormat: "openai",
-            models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
+            models: DEFAULT_PROXY_MODELS,
         },
     ],
     model: "default::gpt-image-2",
     imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
+    videoModel: "default::sora-2",
+    textModel: "default::gpt-5.2-pro",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
     audioFormat: "mp3",
@@ -91,10 +94,10 @@ export const defaultConfig: AiConfig = {
     videoGenerateAudio: "true",
     videoWatermark: "false",
     systemPrompt: "",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
-    imageModels: ["default::gpt-image-2"],
-    videoModels: ["default::grok-imagine-video"],
-    textModels: ["default::gpt-5.5"],
+    models: DEFAULT_PROXY_MODELS.map((model) => `default::${model}`),
+    imageModels: ["default::gpt-image-2", "default::gpt-image-2-official"],
+    videoModels: ["default::sora-2"],
+    textModels: ["default::gpt-5.2-pro"],
     audioModels: ["default::gpt-4o-mini-tts"],
     quality: "auto",
     size: "1:1",
@@ -324,12 +327,18 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
 
 function normalizeChannels(config: AiConfig) {
     const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
-    const channels = persistedChannels.map((channel, index) =>
+    const shouldUseBundledProxy =
+        !persistedChannels.length ||
+        persistedChannels.every((channel) => !channel.apiKey?.trim() || channel.apiKey === SERVER_PROXY_API_KEY) ||
+        persistedChannels.some((channel) => channel.baseUrl === "https://api.openai.com" && !channel.apiKey?.trim());
+    const sourceChannels = shouldUseBundledProxy ? defaultConfig.channels : persistedChannels;
+    const channels = sourceChannels.map((channel, index) =>
         createModelChannel({
             ...channel,
             id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
             name: channel.name || (index === 0 ? "默认渠道" : `渠道 ${index + 1}`),
-            models: uniqueRawModels(channel.models || []),
+            ...(shouldProxyChannel(channel) ? { baseUrl: OPENAI_BASE_URL, apiKey: SERVER_PROXY_API_KEY } : {}),
+            models: uniqueRawModels([...(channel.models || []), ...(shouldProxyChannel(channel) ? DEFAULT_PROXY_MODELS : [])]),
         }),
     );
     if (!channels.length) {
@@ -393,5 +402,17 @@ function normalizeArkPlanBaseUrl(baseUrl: string) {
         return url.toString().replace(/\/+$/, "");
     } catch {
         return baseUrl;
+    }
+}
+
+function shouldProxyChannel(channel: Partial<ModelChannel>) {
+    if (channel.apiFormat && normalizeApiFormat(channel.apiFormat) !== "openai") return false;
+    const baseUrl = (channel.baseUrl || "").trim();
+    if (baseUrl === OPENAI_BASE_URL) return true;
+    try {
+        const host = new URL(baseUrl).hostname.toLowerCase();
+        return PROXIED_OPENAI_COMPATIBLE_HOSTS.includes(host);
+    } catch {
+        return false;
     }
 }

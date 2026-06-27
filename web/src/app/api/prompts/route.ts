@@ -30,6 +30,8 @@ const youMindNanoBananaProRawBase = "https://raw.githubusercontent.com/YouMind-O
 const davidWuGptImage2RawBase = "https://raw.githubusercontent.com/davidwuw0811-boop/awesome-gpt-image2-prompts/main";
 const gptImage2CaseFiles = ["README.md", "cases/ad-creative.md", "cases/character.md", "cases/comparison.md", "cases/ecommerce.md", "cases/portrait.md", "cases/poster.md", "cases/ui.md"];
 const cacheTtlMs = 1000 * 60 * 60;
+const fetchTimeoutMs = 15000;
+const fallbackCoverUrl = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%23161616'/%3E%3Cpath d='M100 420h600M160 360h480M220 300h360' stroke='%2366d9ef' stroke-width='22' stroke-linecap='round' opacity='.75'/%3E%3Ccircle cx='400' cy='190' r='70' fill='%23f8d66d' opacity='.85'/%3E%3C/svg%3E";
 
 const categories: PromptCategory[] = [
     { category: "gpt-image-2-prompts", githubUrl: "https://github.com/EvoLinkAI/awesome-gpt-image-2-API-and-Prompts", build: buildGptImage2Prompts },
@@ -83,6 +85,11 @@ async function loadPrompts() {
         }),
     );
     const items = settled.flat();
+    if (!items.length) {
+        const fallbackItems = fallbackPrompts.map((item) => ({ ...item, category: "built-in", githubUrl: "https://github.com/kkczx5428/infinite-canvas-cc" }));
+        memoryCache = { items: fallbackItems, fetchedAt: Date.now() };
+        return fallbackItems;
+    }
     memoryCache = { items, fetchedAt: Date.now() };
     return items;
 }
@@ -174,11 +181,22 @@ async function buildDavidWuGptImage2Prompts() {
 }
 
 function defaultPrompt(id: string, title: string, prompt: string, coverUrl: string, tags: string[], preview: string): Omit<Prompt, "category" | "githubUrl"> {
-    return { id, title, coverUrl, prompt, tags, preview, createdAt: "", updatedAt: "" };
+    const image = coverUrl || fallbackCoverUrl;
+    return { id, title, coverUrl: image, prompt, tags, preview: preview || markdownPreview([image]), createdAt: "", updatedAt: "" };
 }
 
 async function fetchText(baseUrl: string, file: string) {
-    const response = await fetch(`${baseUrl}/${file}`, { cache: "no-store" });
+    const githubApiUrl = githubContentsUrl(baseUrl, file);
+    if (githubApiUrl) {
+        try {
+            const response = await fetchWithTimeout(githubApiUrl, { headers: { Accept: "application/vnd.github+json", "User-Agent": "infinite-canvas-cc" } });
+            if (response.ok) return decodeGithubContent(await response.json());
+        } catch {
+            // Fall back to the raw URL below.
+        }
+    }
+
+    const response = await fetchWithTimeout(`${baseUrl}/${file}`);
     if (!response.ok) throw new Error(`${file} 拉取失败`);
     return response.text();
 }
@@ -206,7 +224,9 @@ function firstMatch(value: string, pattern: RegExp) {
 }
 
 function extractMarkdownImages(baseUrl: string, markdown: string) {
-    return Array.from(markdown.matchAll(/!\[[^\]]*]\(([^)]+)\)/g), (match) => absoluteImage(baseUrl, match[1])).filter(Boolean);
+    const markdownImages = Array.from(markdown.matchAll(/!\[[^\]]*]\(([^)]+)\)/g), (match) => match[1]);
+    const htmlImages = Array.from(markdown.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi), (match) => match[1]);
+    return Array.from(new Set([...markdownImages, ...htmlImages].map((image) => absoluteImage(baseUrl, image)).filter(Boolean)));
 }
 
 function absoluteImage(baseUrl: string, image: string) {
@@ -256,3 +276,64 @@ function leftPad(value: number) {
 function isActiveOption(value: string) {
     return value && value !== "全部" && value !== "all";
 }
+
+function githubContentsUrl(baseUrl: string, file: string) {
+    const match = baseUrl.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)(?:\/(.*))?$/);
+    if (!match) return "";
+    const [, owner, repo, ref, prefix = ""] = match;
+    const path = [prefix, file].filter(Boolean).join("/").replace(/^\/+/, "");
+    return `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`;
+}
+
+async function fetchWithTimeout(url: string, init?: RequestInit) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), fetchTimeoutMs);
+    try {
+        return await fetch(url, { cache: "no-store", ...(init || {}), signal: controller.signal });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function decodeGithubContent(payload: unknown) {
+    if (!payload || typeof payload !== "object" || !("content" in payload)) throw new Error("GitHub 内容为空");
+    const content = String((payload as { content?: string }).content || "").replace(/\s/g, "");
+    const encoding = String((payload as { encoding?: string }).encoding || "");
+    if (encoding !== "base64" || !content) throw new Error("GitHub 内容格式不支持");
+    return Buffer.from(content, "base64").toString("utf8");
+}
+
+const fallbackPrompts: Omit<Prompt, "category" | "githubUrl">[] = [
+    defaultPrompt(
+        "built-in-0001",
+        "产品海报：高级科技质感",
+        "为一款智能硬件产品生成一张高端电商主图海报。画面中心是产品特写，背景为干净的深色工作室灯光，加入细腻反射、柔和轮廓光、极简中文标题留白，整体质感专业、真实、可商用。",
+        fallbackCoverUrl,
+        ["产品", "海报", "电商"],
+        "",
+    ),
+    defaultPrompt(
+        "built-in-0002",
+        "人物肖像：自然电影感",
+        "生成一张自然电影感人物半身肖像。主体表情放松，柔和侧光，浅景深，真实皮肤纹理，背景是温暖的室内窗边环境，色彩克制、清晰、真实摄影风格。",
+        fallbackCoverUrl,
+        ["人物", "摄影", "电影感"],
+        "",
+    ),
+    defaultPrompt(
+        "built-in-0003",
+        "品牌视觉：新中式茶饮",
+        "为新中式茶饮品牌生成一张品牌视觉图。画面包含一杯精致茶饮、竹影、陶瓷器皿和淡雅水墨层次，构图现代简洁，留出右侧文案空间，整体清爽高级。",
+        fallbackCoverUrl,
+        ["品牌", "饮品", "新中式"],
+        "",
+    ),
+    defaultPrompt(
+        "built-in-0004",
+        "社媒封面：AI 创作教程",
+        "生成一张 16:9 社媒封面图，主题是 AI 创作教程。画面中有桌面电脑、灵感草图、生成图片缩略图和清晰的科技界面元素，整体明亮、现代、信息层级清楚，适合视频封面。",
+        fallbackCoverUrl,
+        ["社媒", "封面", "教程"],
+        "",
+    ),
+];
