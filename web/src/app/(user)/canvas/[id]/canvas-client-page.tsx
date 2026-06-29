@@ -132,6 +132,23 @@ function isUploadableCanvasFile(file: File) {
     return file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file);
 }
 
+function isEditablePasteTarget(target: EventTarget | null) {
+    const element = target instanceof Element ? target : null;
+    return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement || Boolean(element?.closest("[contenteditable='true'],[data-canvas-no-zoom]"));
+}
+
+function getClipboardImageFiles(data: DataTransfer | null) {
+    if (!data) return [];
+
+    const itemFiles = Array.from(data.items || [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+
+    if (itemFiles.length) return itemFiles;
+    return Array.from(data.files || []).filter((file) => file.type.startsWith("image/"));
+}
+
 function batchUploadPosition(position: Position, index: number): Position {
     if (index === 0) return position;
     const column = index % 4;
@@ -245,6 +262,7 @@ function InfiniteCanvasPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
+    const lastPasteEventAtRef = useRef(0);
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1368,6 +1386,20 @@ function InfiniteCanvasPage() {
         [getCanvasCenter],
     );
 
+    const pasteImageFiles = useCallback(
+        async (files: File[]) => {
+            if (!files.length) return false;
+
+            const position = getCanvasCenter();
+            for (const [index, file] of files.entries()) {
+                await createUploadedFileNode(file, batchUploadPosition(position, index));
+            }
+            message.success(files.length > 1 ? `已从剪切板添加 ${files.length} 张图片` : "已从剪切板添加图片");
+            return true;
+        },
+        [createUploadedFileNode, getCanvasCenter, message],
+    );
+
     const pasteSystemClipboard = useCallback(async () => {
         if (!navigator.clipboard) return;
 
@@ -1378,19 +1410,51 @@ function InfiniteCanvasPage() {
             if (!imageType) return;
             const blob = await imageItem.getType(imageType);
             const file = new File([blob], "clipboard-image.png", { type: imageType });
-            void createImageFileNode(file, getCanvasCenter());
-            message.success("已从剪切板添加图片");
+            void pasteImageFiles([file]);
             return;
         }
 
         const text = await navigator.clipboard.readText();
         if (createTextNodeFromClipboard(text)) message.success("已从剪切板添加文本");
-    }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message]);
+    }, [createTextNodeFromClipboard, message, pasteImageFiles]);
+
+    useEffect(() => {
+        const handlePaste = (event: ClipboardEvent) => {
+            if (isEditablePasteTarget(event.target)) return;
+
+            lastPasteEventAtRef.current = Date.now();
+            const files = getClipboardImageFiles(event.clipboardData);
+            if (files.length) {
+                event.preventDefault();
+                void pasteImageFiles(files);
+                return;
+            }
+
+            if (pasteCopiedNodes()) {
+                event.preventDefault();
+                return;
+            }
+
+            const text = event.clipboardData?.getData("text/plain") || "";
+            if (createTextNodeFromClipboard(text)) {
+                event.preventDefault();
+                message.success("已从剪切板添加文本");
+                return;
+            }
+
+            if (navigator.clipboard) {
+                event.preventDefault();
+                void pasteSystemClipboard();
+            }
+        };
+
+        window.addEventListener("paste", handlePaste);
+        return () => window.removeEventListener("paste", handlePaste);
+    }, [createTextNodeFromClipboard, message, pasteCopiedNodes, pasteImageFiles, pasteSystemClipboard]);
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
-            const target = event.target instanceof Element ? event.target : null;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
+            if (isEditablePasteTarget(event.target)) return;
 
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
@@ -1424,8 +1488,10 @@ function InfiniteCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                event.preventDefault();
-                if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                window.setTimeout(() => {
+                    if (Date.now() - lastPasteEventAtRef.current < 250) return;
+                    if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                }, 50);
                 return;
             }
 

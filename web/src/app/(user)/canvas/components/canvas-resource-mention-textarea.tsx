@@ -54,13 +54,12 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     };
 
     const syncMention = (nextValue: string, cursor: number) => {
-        const prefix = nextValue.slice(0, cursor);
-        const match = /(^|\s)@([^\s@]*)$/.exec(prefix);
-        if (!match || !references.some((item) => item.active)) {
+        const token = findMentionToken(nextValue, cursor);
+        if (!token || !references.some((item) => item.active)) {
             closeMention();
             return;
         }
-        setMention({ start: cursor - match[2].length - 1, query: match[2] });
+        setMention(token);
         setActiveIndex(0);
     };
 
@@ -272,4 +271,13 @@ function clamp(value: number, min: number, max: number) {
 
 function escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function findMentionToken(value: string, cursor: number): MentionState | null {
+    const prefix = value.slice(0, cursor);
+    const atIndex = prefix.lastIndexOf("@");
+    if (atIndex < 0) return null;
+    const query = prefix.slice(atIndex + 1);
+    if (/[\s@]/.test(query)) return null;
+    return { start: atIndex, query };
 }
